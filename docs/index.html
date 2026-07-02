@@ -4,9 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>sk8 🛹 — remote Claude Code agents over MCP</title>
-<meta name="description" content="A minimal MCP server that exposes a remote Claude Code agent over HTTP. Delegate self-contained tasks to a Claude Code instance running anywhere.">
+<meta name="description" content="A minimal MCP server that exposes a remote Claude Code agent over HTTP. Delegate self-contained tasks, detach long-running jobs, and resume sessions on a Claude Code instance running anywhere.">
 <meta property="og:title" content="sk8 🛹">
-<meta property="og:description" content="Remote Claude Code agents over MCP. One tool, run_task, delegates a whole task to an agent running on Cloud Run.">
+<meta property="og:description" content="Remote Claude Code agents over MCP. run_task delegates a whole task to an agent on Cloud Run — block for the answer, detach and poll, or resume a session.">
 <meta property="og:type" content="website">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -217,6 +217,7 @@
     <div class="links">
       <a href="#what">what</a>
       <a href="#quickstart">quickstart</a>
+      <a href="#sessions">tasks & sessions</a>
       <a href="#cli">cli</a>
       <a href="#arch">architecture</a>
       <a href="https://github.com/yanndebray/sk8">github ↗</a>
@@ -230,8 +231,9 @@
     <h1><span class="board">🛹</span> sk8</h1>
     <p class="sub">
       A minimal <b>MCP server</b> that exposes a <b>remote Claude Code agent</b> over HTTP.
-      Your laptop's Claude Code calls one tool — <b>run_task</b> — to delegate a whole,
-      self-contained job to an agent running on Cloud Run.
+      Your laptop's Claude Code calls <b>run_task</b> to delegate a whole job to an agent
+      running on Cloud Run — <b>block</b> for the answer, <b>detach</b> and poll long jobs,
+      or pass a <b>session_id</b> to keep the conversation going.
     </p>
     <div class="cta">
       <a class="btn primary" href="#quickstart">⚡ Get started</a>
@@ -255,14 +257,25 @@
     <h2>delegate, don't context-switch</h2>
     <p class="lead">
       sk8 runs <code>claude</code> headless on a remote box and returns the final answer.
-      It's deliberately tiny: <b>synchronous and blocking</b> — no queue, no streaming, no status polling.
-      Fire a task, get the result.
+      It's deliberately small, but no longer just fire-and-wait: block for the result,
+      <b>detach</b> long jobs and poll them, or <b>resume a session</b> so the agent
+      remembers the previous exchange.
     </p>
     <div class="grid">
       <div class="card">
         <div class="ic">🛰️</div>
         <h3>One tool: <span class="k">run_task</span></h3>
-        <p>The remote agent runs your prompt in its <code>cwd</code> and hands back the final text answer. That's the whole API surface.</p>
+        <p>The remote agent runs your prompt in its <code>cwd</code> and hands back the final text answer. Blocking by default, up to 600s.</p>
+      </div>
+      <div class="card">
+        <div class="ic">🔀</div>
+        <h3>Detach <span class="k">&amp; poll</span></h3>
+        <p><code>run_task(detach=true)</code> returns <code>TASK_STARTED: &lt;task_id&gt;</code> immediately and runs in the background — poll <code>get_task</code> for status and the answer. Long jobs stop fighting your MCP client's timeout.</p>
+      </div>
+      <div class="card">
+        <div class="ic">🧵</div>
+        <h3>Resumable <span class="k">sessions</span></h3>
+        <p>Every answer ends with a <code>[session_id]</code>. Pass it back to continue the same conversation in the same workspace — follow-ups can be short instead of restating the brief.</p>
       </div>
       <div class="card">
         <div class="ic">🧬</div>
@@ -277,7 +290,7 @@
       <div class="card">
         <div class="ic">📦</div>
         <h3>Files in &amp; out <span class="k">(optional)</span></h3>
-        <p>GCS-backed signed URLs move inputs and artifacts around <code>run_task</code> without bloating the prompt or hitting the 32 MB request cap.</p>
+        <p>Send small files inline with the <code>files</code> param — no bucket needed — or use GCS-backed signed URLs to move big inputs and artifacts without bloating the prompt.</p>
       </div>
     </div>
   </div>
@@ -316,7 +329,45 @@
   </div>
 </section>
 
-<section id="cli">
+<section id="sessions">
+  <div class="wrap">
+    <div class="eyebrow">// new in 0.7+</div>
+    <h2>detach, poll, resume</h2>
+    <p class="lead">
+      Long jobs run detached in the background, and every task hands back a session id
+      you can use to continue the conversation — the remote agent keeps its memory and
+      its workspace between calls.
+    </p>
+
+    <div class="code">
+      <div class="code-head"><span>detached tasks — fire now, poll later</span><button class="copy">copy</button></div>
+      <pre><code><span class="c-cmt"># kick off a long job without blocking your session</span>
+<span class="c-cmd">run_task</span>(prompt=<span class="c-str">"profile the test suite and find the 5 slowest tests"</span>, detach=<span class="c-arg">true</span>)
+<span class="c-cmt">→ TASK_STARTED: 3f2a91c0…</span>
+
+<span class="c-cmt"># poll every 30-60s until it's done (polling also keeps the instance alive)</span>
+<span class="c-cmd">get_task</span>(<span class="c-str">"3f2a91c0…"</span>)
+<span class="c-cmt">→ {status: "done", result: "…", session_id: "9b1c44d2…"}</span></code></pre>
+    </div>
+
+    <div class="code">
+      <div class="code-head"><span>sessions — follow up instead of restating</span><button class="copy">copy</button></div>
+      <pre><code><span class="c-cmt"># every answer ends with a session id line</span>
+<span class="c-cmd">run_task</span>(prompt=<span class="c-str">"write a fibonacci module with a CLI"</span>)
+<span class="c-cmt">→ … final answer …  [session_id: 9b1c44d2…]</span>
+
+<span class="c-cmt"># pass it back — same conversation, same workspace, short follow-up</span>
+<span class="c-cmd">run_task</span>(prompt=<span class="c-str">"now also add tests"</span>, session_id=<span class="c-str">"9b1c44d2…"</span>)</code></pre>
+    </div>
+
+    <p class="lead" style="margin:22px 0 0;font-size:13.5px">
+      On GCS-backed agents, transcripts are mirrored to the bucket, so sessions survive
+      even when the scale-to-zero instance is recycled between calls.
+    </p>
+  </div>
+</section>
+
+<section id="cli" style="background:var(--bg-soft);border-block:1px solid var(--border)">
   <div class="wrap">
     <div class="eyebrow">// the lifecycle</div>
     <h2>the sk8 CLI</h2>
@@ -337,7 +388,7 @@
   </div>
 </section>
 
-<section id="arch" style="background:var(--bg-soft);border-block:1px solid var(--border)">
+<section id="arch">
   <div class="wrap">
     <div class="eyebrow">// under the hood</div>
     <h2>architecture</h2>
@@ -351,14 +402,14 @@
   </div>
 </section>
 
-<section id="limits">
+<section id="limits" style="background:var(--bg-soft);border-block:1px solid var(--border)">
   <div class="wrap">
     <div class="eyebrow">// fine print</div>
     <h2>limitations</h2>
     <div class="grid">
-      <div class="card"><h3>⏳ Synchronous only</h3><p><code>run_task</code> blocks until the agent finishes (up to a 600s timeout). No streaming, no progress, no status to poll.</p></div>
-      <div class="card"><h3>🚦 One task at a time</h3><p>No queue or concurrency management — fire tasks serially.</p></div>
-      <div class="card"><h3>🧠 Stateless across calls</h3><p>Each call is a fresh headless <code>claude</code> with no memory of prior tasks. Put all context in the prompt.</p></div>
+      <div class="card"><h3>⏳ 600s per task</h3><p>Every run — blocking or detached — is capped at a 600s timeout. No streaming; detached tasks report progress only as coarse <code>get_task</code> status.</p></div>
+      <div class="card"><h3>🚦 Scale-to-zero amnesia</h3><p>Task records and sessions live on the instance. Without a GCS bucket they vanish when Cloud Run recycles it — poll regularly to keep it warm, or configure a bucket.</p></div>
+      <div class="card"><h3>🧠 Context is the prompt</h3><p>Sessions remember prior exchanges, but a <em>fresh</em> task still starts from nothing — write the first prompt as a standalone brief.</p></div>
     </div>
     <div class="warn">
       <b>⚠ Arbitrary code execution.</b> <code>claude</code> can do anything the host user can.
@@ -398,7 +449,11 @@
     {t:'prompt',txt:'claude'},
     {t:'out',cls:'pr2',txt:'> Use sk8 run_task: "summarize every file in ./src"'},
     {t:'out',cls:'ot',txt:'… remote agent working …'},
-    {t:'out',cls:'ok',txt:'✓ 14 files summarized → returned final answer'},
+    {t:'out',cls:'ok',txt:'✓ 14 files summarized  ·  [session_id: 9b1c44d2…]'},
+    {t:'out',cls:'pr2',txt:'> run_task session_id=9b1c44d2…: "now diagram the imports"'},
+    {t:'out',cls:'ok',txt:'✓ resumed session — same workspace, full memory'},
+    {t:'out',cls:'pr2',txt:'> run_task detach=true: "profile the whole test suite"'},
+    {t:'out',cls:'yl',txt:'TASK_STARTED: 3f2a91c0…  ·  get_task polls the result'},
     {t:'blank'},
     {t:'prompt',txt:'',hold:true},
   ];
