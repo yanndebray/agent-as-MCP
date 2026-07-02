@@ -29,7 +29,7 @@ WORKDIR /app
 # be present for `uv sync` to build the project; it's not used at runtime.
 # README.md is required too: pyproject's `readme = "README.md"` makes hatchling
 # read it during the build.
-COPY pyproject.toml uv.lock README.md server.py server_sdk.py profile_config.py file_io.py sk8.py ./
+COPY pyproject.toml uv.lock README.md server.py server_sdk.py profile_config.py file_io.py task_store.py sk8.py ./
 # --extra gcs pulls in google-cloud-storage so the deployed agent can mint signed
 # URLs and shuttle files to/from GCS (issue #14). Harmless when GCS_BUCKET is
 # unset — file_io.enabled() is then False and the file-I/O tools don't register.
