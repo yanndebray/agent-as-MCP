@@ -39,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 # Side-view skateboard, shown as a banner on each invocation (stderr, so it
 # never pollutes --json stdout; muted by --quiet like all other progress).

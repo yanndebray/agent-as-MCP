@@ -1,6 +1,6 @@
 [project]
 name = "sk8"
-version = "0.6.1"
+version = "0.7.0"
 description = "MCP server exposing a remote Claude Code agent over HTTP"
 readme = "README.md"
 requires-python = ">=3.11"
