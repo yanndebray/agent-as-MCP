@@ -78,11 +78,13 @@ def create(task_id: str, prompt: str) -> dict:
     return rec
 
 
-def finish(task_id: str, status: str, result: str) -> None:
+def finish(task_id: str, status: str, result: str,
+           session_id: str | None = None) -> None:
     """Mark a task done/error and store its final text. Last act of every run."""
     now = time.time()
     rec = get(task_id) or {"task_id": task_id, "created_at": now}
-    rec.update(status=status, result=result, updated_at=now, finished_at=now)
+    rec.update(status=status, result=result, updated_at=now, finished_at=now,
+               session_id=session_id)
     _write(rec)
 
 

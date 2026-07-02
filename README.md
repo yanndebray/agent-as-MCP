@@ -101,6 +101,23 @@ Then in a Claude Code session on your laptop:
 
 The remote agent runs the task in its `cwd` and returns the final answer.
 
+## Sessions (follow-up tasks)
+
+Every `run_task` answer ends with a `[session_id: <uuid>]` line (detached
+tasks report it via `get_task` once finished). Pass it back to continue the
+same conversation instead of restating the brief:
+
+> Use the sk8 run_task tool with session_id "<uuid>" and prompt:
+> "now also add unit tests for that script"
+
+A resumed task remembers the prior exchange and runs in the session's
+original working directory (the `cwd` argument is ignored), so files from
+earlier turns are still in place. Session transcripts are mirrored to GCS on
+`--bucket` agents, so follow-ups work even after the instance was recycled;
+without a bucket, sessions last only as long as the instance. An unknown or
+expired id fails fast with `AGENT_ERROR: unknown session_id ...` — start
+fresh with a full brief.
+
 ## Detached tasks (long-running work)
 
 A synchronous `run_task` result lives and dies with its HTTP connection: if
@@ -172,5 +189,6 @@ base64. Without a bucket the feature stays dark and `run_task` is text-only. See
   share its CPU/memory; there's no scheduling or backpressure beyond that.
 - **Arbitrary code execution** — `claude` can do anything the host user can. 
   Treat reaching this endpoint as equivalent to a shell on the box.
-- **Stateless across calls** — each `run_task` is a fresh headless `claude`
-  invocation with no memory of previous tasks. Put all needed context in the prompt.
+- **Fresh context unless resumed** — each `run_task` without a `session_id` is
+  a fresh headless `claude` invocation with no memory of previous tasks; put
+  all needed context in the prompt, or resume a session for follow-ups.

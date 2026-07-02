@@ -157,6 +157,25 @@ def get_text(key: str) -> str | None:
         return None
 
 
+def put_file(key: str, path: str) -> None:
+    """Upload one local file to the bucket (session transcripts and the like)."""
+    storage.Client().bucket(BUCKET).blob(key).upload_from_filename(path)
+
+
+def get_file(key: str, path: str) -> bool:
+    """Download one object to a local path; False if absent/unreadable."""
+    try:
+        storage.Client().bucket(BUCKET).blob(key).download_to_filename(path)
+        return True
+    except Exception:
+        # download_to_filename leaves a partial/empty file behind on failure.
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        return False
+
+
 def reset_workspace(cwd: str) -> None:
     """Remove stale ``inputs/`` and ``outputs/`` dirs before a run.
 
