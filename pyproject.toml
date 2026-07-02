@@ -44,4 +44,4 @@ build-backend = "hatchling.build"
 # Single-file modules at the repo root (no package dir), so tell hatchling
 # exactly which files ship in the wheel rather than inferring from the name.
 [tool.hatch.build.targets.wheel]
-only-include = ["sk8.py", "server.py", "server_sdk.py", "profile_config.py", "file_io.py"]
+only-include = ["sk8.py", "server.py", "server_sdk.py", "profile_config.py", "file_io.py", "task_store.py"]

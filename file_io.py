@@ -143,6 +143,20 @@ def fetch_result(object_key: str) -> dict:
     }
 
 
+def put_text(key: str, text: str) -> None:
+    """Write a small JSON/text object to the bucket (task records, not file bytes)."""
+    storage.Client().bucket(BUCKET).blob(key).upload_from_string(
+        text, content_type="application/json")
+
+
+def get_text(key: str) -> str | None:
+    """Read a small text object back, or None if absent/unreadable."""
+    try:
+        return storage.Client().bucket(BUCKET).blob(key).download_as_text()
+    except Exception:
+        return None
+
+
 def reset_workspace(cwd: str) -> None:
     """Remove stale ``inputs/`` and ``outputs/`` dirs before a run.
 
