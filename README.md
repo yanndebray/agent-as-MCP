@@ -1,5 +1,6 @@
 # sk8 🛹
 
+[![PyPI](https://img.shields.io/pypi/v/sk8)](https://pypi.org/project/sk8/)
 
 A minimal MCP server that exposes a **remote Claude Code agent** over HTTP.
 Claude Code on your laptop can call its one tool, `run_task`, to delegate a
