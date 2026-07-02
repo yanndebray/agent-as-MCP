@@ -6,7 +6,9 @@ Claude Code on your laptop can call its one tool, `run_task`, to delegate a
 complete, self-contained task to a Claude Code instance running on this machine.
 
 The tool runs `claude` headless here and returns the final text answer.
-It is **synchronous and blocking** — no queue, no streaming, no status polling.
+By default it is **synchronous and blocking**; for long tasks, pass
+`detach=true` to get a task id back immediately and poll `get_task` for the
+result (see "Detached tasks" below).
 
 **`server_sdk.py`** — drives the same agent loop through the **Claude Agent
 SDK** (`claude-agent-sdk`), giving a typed async message stream and structured
@@ -98,6 +100,36 @@ Then in a Claude Code session on your laptop:
 
 The remote agent runs the task in its `cwd` and returns the final answer.
 
+## Detached tasks (long-running work)
+
+A synchronous `run_task` result lives and dies with its HTTP connection: if
+the client's MCP timeout fires (Claude Code's default is well under sk8's
+600s task budget) or the connection drops, the work completes on the server
+and evaporates. For anything long, detach instead:
+
+> Use the sk8 run_task tool with detach=true and prompt: "..."
+
+The call returns `TASK_STARTED: <task_id>` immediately; the task runs in the
+background in its own workspace. Poll:
+
+> Use the sk8 get_task tool with task_id "<task_id>"
+
+which returns `{status: running|done|error|lost|not_found, result, ...}` —
+`result` carries the final answer (including any Artifacts block) once the
+status is `done`. Poll every 30–60s; on a scale-to-zero deployment the polls
+also keep the instance alive.
+
+Task records are written to local disk and, when the agent has a GCS bucket
+(`--bucket`), mirrored to `<agent>/tasks/<task_id>.json` — so a finished
+result survives the instance being recycled between the run and the poll.
+Without a bucket, detach still works but a recycled instance loses the
+record (`get_task` then reports `not_found`).
+
+Detached tasks are supported by the SDK backend (`server_sdk.py`, what the
+container image runs). Deploys via `sk8 create` set `--no-cpu-throttling` on
+the Cloud Run service so background work keeps its CPU after the HTTP
+response returns.
+
 ## Cloud deployment (Cloud Run, App Runner, Fly, …)
 
 The GCP services (Cloud Build, Artifact Registry, Secret Manager, IAM, Cloud
@@ -132,10 +164,11 @@ base64. Without a bucket the feature stays dark and `run_task` is text-only. See
 
 ## Limitations
 
-- **Synchronous only** — `run_task` blocks until the remote agent finishes (up
-  to a 600s timeout). No streaming, no progress, no status to poll.
-- **One task at a time** — there's no queue or concurrency management; fire tasks
-  serially.
+- **No streaming or progress** — synchronous `run_task` blocks until the remote
+  agent finishes (up to a 600s timeout); detached tasks report only
+  running/done/error via `get_task`, not intermediate output.
+- **No queue** — detached tasks run concurrently on the single instance and
+  share its CPU/memory; there's no scheduling or backpressure beyond that.
 - **Arbitrary code execution** — `claude` can do anything the host user can. 
   Treat reaching this endpoint as equivalent to a shell on the box.
 - **Stateless across calls** — each `run_task` is a fresh headless `claude`

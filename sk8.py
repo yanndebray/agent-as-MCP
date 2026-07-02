@@ -39,7 +39,7 @@ import subprocess
 import sys
 import tempfile
 
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 # Side-view skateboard, shown as a banner on each invocation (stderr, so it
 # never pollutes --json stdout; muted by --quiet like all other progress).
@@ -307,6 +307,11 @@ def cmd_create(args: argparse.Namespace) -> int:
         "--region", region,
         "--allow-unauthenticated",
         "--timeout=3600",          # tasks run up to 600s; 300s default would 504
+        # Detached tasks (run_task detach=true) keep working after the HTTP
+        # response returns; default request-based throttling would starve them
+        # to near-zero CPU. Instance-based billing, but bounded by
+        # min-instances=0/max-instances=1.
+        "--no-cpu-throttling",
         f"--cpu={args.cpu}", f"--memory={args.memory}",
         "--min-instances=0", "--max-instances=1", "--concurrency=8",
         f"--set-secrets=AGENT_TOKEN={token_secret}:latest,ANTHROPIC_API_KEY=anthropic-api-key:latest",
