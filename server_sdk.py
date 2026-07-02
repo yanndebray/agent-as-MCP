@@ -38,6 +38,7 @@ from claude_agent_sdk.types import AssistantMessage, ResultMessage, TextBlock
 
 import file_io
 import profile_config
+import session_store
 import task_store
 
 TIMEOUT_SECONDS = 600
@@ -88,8 +89,15 @@ HEADLESS_NOTE = (
 
 
 async def _run(prompt: str, cwd: str, inputs: list[str] | None = None,
-               files: list[dict] | None = None) -> str:
-    """Drive one task to completion via the Agent SDK, return the final text."""
+               files: list[dict] | None = None,
+               resume: str | None = None) -> tuple[str, str | None]:
+    """Drive one task via the Agent SDK; return (final text, session id).
+
+    With `resume`, the SDK continues that prior session (its transcript must
+    already be on local disk — run_task restores it first). The session id
+    comes back even on agent errors, so a failed follow-up can still be
+    continued.
+    """
     # The cwd may not exist yet — the default scratch dir ($AGENT_DEFAULT_CWD,
     # e.g. /tmp/workspace) lives on an in-memory FS that starts empty on every
     # managed-platform instance, so nothing creates it ahead of time.
@@ -103,6 +111,9 @@ async def _run(prompt: str, cwd: str, inputs: list[str] | None = None,
     prompt = HEADLESS_NOTE + prompt
     opts = dict(
         cwd=cwd,
+        # Continue a prior session's conversation in place (same session id,
+        # not a fork). None for fresh runs, where the SDK mints a new session.
+        resume=resume,
         # Run unattended: there is no human to approve tool calls mid-task, so
         # the agent must not block on a permission prompt. This is the SDK
         # equivalent of `--permission-mode bypassPermissions` in server.py and
@@ -126,6 +137,7 @@ async def _run(prompt: str, cwd: str, inputs: list[str] | None = None,
 
     final = None          # ResultMessage.result, if the SDK gives us one
     transcript: list[str] = []  # fallback: every assistant text block, joined
+    sid: str | None = None      # session id, for follow-up runs
 
     async for message in query(prompt=prompt, options=options):
         if isinstance(message, AssistantMessage):
@@ -133,12 +145,17 @@ async def _run(prompt: str, cwd: str, inputs: list[str] | None = None,
                 if isinstance(block, TextBlock):
                     transcript.append(block.text)
         elif isinstance(message, ResultMessage):
+            sid = message.session_id
             if message.is_error:
-                return f"AGENT_ERROR: {message.subtype}"
+                return f"AGENT_ERROR: {message.subtype}", sid
             final = message.result
 
+    if sid:
+        # Make the session resumable: record its cwd and mirror the transcript
+        # to GCS so a follow-up works even on a different instance.
+        await asyncio.to_thread(session_store.persist, sid, cwd)
     text = final if final is not None else "\n".join(transcript)
-    return text + await asyncio.to_thread(_collect_outputs, cwd)
+    return text + await asyncio.to_thread(_collect_outputs, cwd), sid
 
 
 def _prepare_inputs(prompt: str, cwd: str, inputs: list[str] | None,
@@ -184,47 +201,58 @@ def _collect_outputs(cwd: str) -> str:
 
 async def _run_detached(task_id: str, prompt: str, cwd: str,
                         inputs: list[str] | None,
-                        files: list[dict] | None) -> None:
+                        files: list[dict] | None,
+                        resume: str | None = None) -> None:
     """Drive a detached task and persist its outcome as the last act.
 
     Every exit path lands in task_store.finish(), so a poll can always tell
     what happened — nothing escapes into the void of an unawaited coroutine.
     """
+    sid = None
     try:
-        result = await asyncio.wait_for(
-            _run(prompt, cwd, inputs, files), timeout=TIMEOUT_SECONDS)
+        result, sid = await asyncio.wait_for(
+            _run(prompt, cwd, inputs, files, resume), timeout=TIMEOUT_SECONDS)
         status = "error" if result.startswith("AGENT_ERROR:") else "done"
     except asyncio.TimeoutError:
         status, result = "error", f"AGENT_ERROR: timed out after {TIMEOUT_SECONDS}s"
     except Exception as exc:
         status, result = "error", f"AGENT_ERROR: {exc}"
-    await asyncio.to_thread(task_store.finish, task_id, status, result)
+    await asyncio.to_thread(task_store.finish, task_id, status, result, sid)
 
 
 @mcp.tool
 async def run_task(prompt: str, cwd: str = DEFAULT_CWD,
                    inputs: list[str] | None = None,
                    files: list[dict] | None = None,
-                   detach: bool = False) -> str:
+                   detach: bool = False,
+                   session_id: str | None = None) -> str:
     """Delegate a complete, self-contained task to a remote agent on another machine.
 
     The remote agent is a full Claude Code instance driven via the Claude Agent
     SDK. It does NOT share your conversation, files, or context — so the `prompt`
     must carry everything it needs: the goal, relevant background, constraints,
     and the exact deliverable you expect. Write it as a standalone brief, not a
-    follow-up.
+    follow-up — UNLESS you pass `session_id` (see below).
 
     By default the call is synchronous and blocking: it runs the task to
     completion (up to 600s) and returns only the agent's final text answer. Use
     `cwd` to point the agent at the directory it should work in on the remote
     machine.
 
+    Sessions — every answer ends with a `[session_id: <uuid>]` line. Pass that
+    id back as `session_id` to CONTINUE the same conversation: the remote agent
+    remembers the prior exchange and resumes in the same working directory
+    (`cwd` is then taken from the session, not from the `cwd` argument), so
+    follow-ups can be short ("now also add tests") instead of restating the
+    brief. Sessions survive instance recycling only on GCS-backed agents.
+
     For long tasks (or a client MCP timeout shorter than the task), pass
     `detach=true`: the call returns immediately with a line
     `TASK_STARTED: <task_id>` and the task runs in the background — poll
-    `get_task(task_id)` for status and the final answer. Detached tasks get
-    their own workspace unless you pass an explicit `cwd`. Poll roughly every
-    30-60s; polling also keeps the (scale-to-zero) instance alive.
+    `get_task(task_id)` for status, the final answer, and the session id.
+    Detached tasks get their own workspace unless you pass an explicit `cwd`
+    or a `session_id`. Poll roughly every 30-60s; polling also keeps the
+    (scale-to-zero) instance alive.
 
     File transfer — two ways to send files in, both landing in `cwd/inputs/`:
       * `files` (small files, no bucket needed): a list of
@@ -240,35 +268,52 @@ async def run_task(prompt: str, cwd: str = DEFAULT_CWD,
     Returns the agent's final answer (or `TASK_STARTED: <task_id>` when
     detached), or a string starting with "AGENT_ERROR:" on failure.
     """
+    if session_id:
+        # Resume: bring the transcript back onto this instance (GCS mirror on
+        # a cold one) and run in the session's original directory so the SDK
+        # finds it and the conversation's files are still around.
+        restored_cwd = await asyncio.to_thread(session_store.restore, session_id)
+        if restored_cwd is None:
+            return (f"AGENT_ERROR: unknown session_id {session_id!r} — invalid, "
+                    "expired, or from an instance whose records were recycled "
+                    "(sessions only survive recycling on GCS-backed agents). "
+                    "Start a fresh task with a full standalone brief.")
+        cwd = restored_cwd
     if detach:
         task_id = task_store.new_task_id()
         # Isolate each detached task's workspace: concurrent tasks sharing the
         # default cwd would clobber each other via reset_workspace(). An
-        # explicit caller-chosen cwd is honored as-is.
-        if cwd == DEFAULT_CWD:
+        # explicit caller-chosen cwd is honored as-is, and a resumed session
+        # must stay in its original directory.
+        if cwd == DEFAULT_CWD and not session_id:
             cwd = os.path.join(DEFAULT_CWD, "tasks", task_id)
         await asyncio.to_thread(task_store.create, task_id, prompt)
         task = asyncio.create_task(
-            _run_detached(task_id, prompt, cwd, inputs, files))
+            _run_detached(task_id, prompt, cwd, inputs, files, session_id))
         _DETACHED.add(task)
         task.add_done_callback(_DETACHED.discard)
         return (f"TASK_STARTED: {task_id}\n"
                 f"Poll get_task(\"{task_id}\") for status and the result.")
     try:
-        return await asyncio.wait_for(
-            _run(prompt, cwd, inputs, files), timeout=TIMEOUT_SECONDS)
+        text, sid = await asyncio.wait_for(
+            _run(prompt, cwd, inputs, files, session_id),
+            timeout=TIMEOUT_SECONDS)
     except asyncio.TimeoutError:
         return f"AGENT_ERROR: timed out after {TIMEOUT_SECONDS}s"
     except Exception as exc:  # e.g. cwd missing, claude not on PATH, SDK/GCS error
         return f"AGENT_ERROR: {exc}"
+    if sid:
+        text += f"\n\n[session_id: {sid}]"
+    return text
 
 
 @mcp.tool
 async def get_task(task_id: str) -> dict:
     """Check on a detached run_task: status and, once finished, the final answer.
 
-    Returns {task_id, status, elapsed_seconds, prompt, result} where status is
-    one of:
+    Returns {task_id, status, elapsed_seconds, prompt, result, session_id}
+    where `session_id` (set once finished) can be passed to run_task to
+    continue the task's conversation, and status is one of:
       * "running"   — still going; poll again in 30-60s (result is null).
       * "done"      — finished; `result` holds the agent's final answer,
                       including any trailing Artifacts block.
@@ -295,7 +340,7 @@ async def get_task(task_id: str) -> dict:
         status = "lost"
     return {"task_id": task_id, "status": status,
             "elapsed_seconds": elapsed, "prompt": rec.get("prompt"),
-            "result": rec.get("result")}
+            "result": rec.get("result"), "session_id": rec.get("session_id")}
 
 
 # File-transfer tools only exist when the agent is GCS-backed (GCS_BUCKET set).

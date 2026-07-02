@@ -1483,7 +1483,7 @@ wheels = [
 
 [[package]]
 name = "sk8"
-version = "0.6.1"
+version = "0.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },
